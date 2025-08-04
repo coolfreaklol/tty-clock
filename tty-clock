@@ -1,0 +1,518 @@
+import curses
+import locale
+import time
+import signal
+import sys
+from curses import wrapper
+
+class TTYClock:
+    def __init__(self):
+        
+        self.NORMFRAMEW = 35
+        self.SECFRAMEW = 54
+        self.DATEWINH = 3
+        self.AMSIGN = " [AM]"
+        self.PMSIGN = " [PM]"
+        
+        
+        self.running = True
+        self.ttyscr = None
+        self.tty = None
+        self.bg = curses.COLOR_BLACK
+        
+        
+        self.options = {
+            'second': False,
+            'screensaver': False,
+            'twelve': False,
+            'center': False,
+            'rebound': False,
+            'date': True,
+            'utc': False,
+            'box': False,
+            'noquit': False,
+            'format': "%F",
+            'color': curses.COLOR_GREEN,
+            'bold': False,
+            'delay': 1,
+            'blink': False,
+            'nsdelay': 0
+        }
+        
+        
+        self.geo = {
+            'x': 0, 'y': 0, 'w': self.NORMFRAMEW, 'h': 7,
+            'a': 1, 'b': 1  # For rebound
+        }
+        
+        
+        self.date = {
+            'hour': [0, 0],
+            'minute': [0, 0],
+            'second': [0, 0],
+            'datestr': "",
+            'old_datestr': ""
+        }
+        
+        self.meridiem = ""
+        self.framewin = None
+        self.datewin = None
+        
+       
+        self.numbers = [
+            [1,1,1,1,0,1,1,0,1,1,0,1,1,1,1],  # 0
+            [0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],  # 1
+            [1,1,1,0,0,1,1,1,1,1,0,0,1,1,1],  # 2
+            [1,1,1,0,0,1,1,1,1,0,0,1,1,1,1],  # 3
+            [1,0,1,1,0,1,1,1,1,0,0,1,0,0,1],  # 4
+            [1,1,1,1,0,0,1,1,1,0,0,1,1,1,1],  # 5
+            [1,1,1,1,0,0,1,1,1,1,0,1,1,1,1],  # 6
+            [1,1,1,0,0,1,0,0,1,0,0,1,0,0,1],  # 7
+            [1,1,1,1,0,1,1,1,1,1,0,1,1,1,1],  # 8
+            [1,1,1,1,0,1,1,1,1,0,0,1,1,1,1]   # 9
+        ]
+    
+    def init(self, stdscr):
+        self.stdscr = stdscr
+        locale.setlocale(locale.LC_TIME, "")
+        
+        
+        curses.cbreak()
+        curses.noecho()
+        self.stdscr.keypad(True)
+        curses.curs_set(0)
+        self.stdscr.clear()
+        
+        
+        curses.start_color()
+        if curses.use_default_colors() == curses.OK:
+            self.bg = -1
+        
+        curses.init_pair(1, self.bg, self.options['color'])
+        curses.init_pair(2, self.options['color'], self.bg)
+        
+        
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        
+        
+        if not self.geo['x']:
+            self.geo['x'] = 0
+        if not self.geo['y']:
+            self.geo['y'] = 0
+        if not self.geo['a']:
+            self.geo['a'] = 1
+        if not self.geo['b']:
+            self.geo['b'] = 1
+        
+        self.geo['w'] = self.SECFRAMEW if self.options['second'] else self.NORMFRAMEW
+        self.geo['h'] = 7
+        
+        self.update_hour()
+        
+        
+        self.framewin = curses.newwin(
+            self.geo['h'], self.geo['w'], 
+            self.geo['x'], self.geo['y']
+        )
+        
+        if self.options['box']:
+            self.framewin.box()
+        
+        if self.options['bold']:
+            self.framewin.attron(curses.A_BOLD)
+        
+        
+        self.datewin = curses.newwin(
+            self.DATEWINH, len(self.date['datestr']) + 2,
+            self.geo['x'] + self.geo['h'] - 1,
+            self.geo['y'] + (self.geo['w'] // 2) - (len(self.date['datestr']) // 2) - 1
+        )
+        
+        if self.options['box'] and self.options['date']:
+            self.datewin.box()
+        
+        self.datewin.clearok(True)
+        self.set_center(self.options['center'])
+        
+        if self.options['date']:
+            self.datewin.refresh()
+        
+        self.framewin.refresh()
+    
+    def signal_handler(self, signum, frame):
+        if signum in (signal.SIGINT, signal.SIGTERM):
+            self.running = False
+    
+    def cleanup(self):
+        pass
+    
+    def update_hour(self):
+        now = time.time()
+        tm = time.gmtime(now) if self.options['utc'] else time.localtime(now)
+        
+        ihour = tm.tm_hour
+        
+        if self.options['twelve']:
+            self.meridiem = self.PMSIGN if ihour >= 12 else self.AMSIGN
+        else:
+            self.meridiem = ""
+        
+        
+        if self.options['twelve'] and ihour > 12:
+            ihour -= 12
+        if self.options['twelve'] and ihour == 0:
+            ihour = 12
+        
+        
+        self.date['hour'] = [ihour // 10, ihour % 10]
+        self.date['minute'] = [tm.tm_min // 10, tm.tm_min % 10]
+        self.date['second'] = [tm.tm_sec // 10, tm.tm_sec % 10]
+        
+        
+        self.date['old_datestr'] = self.date['datestr']
+        tmpstr = time.strftime(self.options['format'], tm)
+        self.date['datestr'] = f"{tmpstr}{self.meridiem}"
+    
+    def draw_number(self, n, x, y):
+        sy = y
+        for i in range(30):
+            if sy == y + 6:
+                sy = y
+                x += 1
+            
+            if self.options['bold']:
+                self.framewin.attron(curses.A_BOLD)
+            else:
+                self.framewin.attroff(curses.A_BOLD)
+            
+            color = curses.color_pair(1 if self.numbers[n][i//2] else 0)
+            self.framewin.addstr(x, sy, " ", color)
+            sy += 1
+        
+        self.framewin.refresh()
+    
+    def draw_clock(self):
+        if (self.options['date'] and not self.options['rebound'] and 
+            self.date['datestr'] != self.date['old_datestr']):
+            self.clock_move(
+                self.geo['x'], self.geo['y'], 
+                self.geo['w'], self.geo['h']
+            )
+        
+        
+        self.draw_number(self.date['hour'][0], 1, 1)
+        self.draw_number(self.date['hour'][1], 1, 8)
+        
+        
+        dotcolor = curses.color_pair(1)
+        if self.options['blink'] and time.time() % 2 < 1:
+            dotcolor = curses.color_pair(2)
+        
+        self.framewin.addstr(2, 16, "  ", dotcolor)
+        self.framewin.addstr(4, 16, "  ", dotcolor)
+        
+        
+        self.draw_number(self.date['minute'][0], 1, 20)
+        self.draw_number(self.date['minute'][1], 1, 27)
+        
+        
+        if self.options['bold']:
+            self.datewin.attron(curses.A_BOLD)
+        else:
+            self.datewin.attroff(curses.A_BOLD)
+        
+        if self.options['date']:
+            self.datewin.addstr(
+                self.DATEWINH // 2, 1, 
+                self.date['datestr'], 
+                curses.color_pair(2)
+            )
+            self.datewin.refresh()
+        
+        
+        if self.options['second']:
+            self.framewin.addstr(2, self.NORMFRAMEW, "  ", dotcolor)
+            self.framewin.addstr(4, self.NORMFRAMEW, "  ", dotcolor)
+            self.draw_number(self.date['second'][0], 1, 39)
+            self.draw_number(self.date['second'][1], 1, 46)
+    
+    def clock_move(self, x, y, w, h):
+        
+        self.framewin.border(' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ')
+        self.framewin.erase()
+        self.framewin.refresh()
+        
+        if self.options['date']:
+            self.datewin.border(' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ')
+            self.datewin.erase()
+            self.datewin.refresh()
+        
+        
+        self.geo['x'] = x
+        self.geo['y'] = y
+        self.geo['w'] = w
+        self.geo['h'] = h
+        
+        self.framewin.mvwin(x, y)
+        self.framewin.resize(h, w)
+        
+        
+        if self.options['date']:
+            self.datewin.mvwin(
+                self.geo['x'] + self.geo['h'] - 1,
+                self.geo['y'] + (self.geo['w'] // 2) - (len(self.date['datestr']) // 2) - 1
+            )
+            self.datewin.resize(self.DATEWINH, len(self.date['datestr']) + 2)
+            
+            if self.options['box']:
+                self.datewin.box()
+        
+        if self.options['box']:
+            self.framewin.box()
+        
+        self.framewin.refresh()
+        self.datewin.refresh()
+    
+    def clock_rebound(self):
+        if not self.options['rebound']:
+            return
+        
+        if self.geo['x'] < 1:
+            self.geo['a'] = 1
+        if self.geo['x'] > (curses.LINES - self.geo['h'] - self.DATEWINH):
+            self.geo['a'] = -1
+        if self.geo['y'] < 1:
+            self.geo['b'] = 1
+        if self.geo['y'] > (curses.COLS - self.geo['w'] - 1):
+            self.geo['b'] = -1
+        
+        self.clock_move(
+            self.geo['x'] + self.geo['a'],
+            self.geo['y'] + self.geo['b'],
+            self.geo['w'],
+            self.geo['h']
+        )
+    
+    def set_second(self):
+        self.options['second'] = not self.options['second']
+        new_w = self.SECFRAMEW if self.options['second'] else self.NORMFRAMEW
+        y_adj = 0
+        
+        while (self.geo['y'] - y_adj) > (curses.COLS - new_w - 1):
+            y_adj += 1
+        
+        self.clock_move(
+            self.geo['x'], 
+            self.geo['y'] - y_adj, 
+            new_w, 
+            self.geo['h']
+        )
+        self.set_center(self.options['center'])
+    
+    def set_center(self, b):
+        self.options['center'] = b
+        
+        if self.options['center']:
+            self.options['rebound'] = False
+            self.clock_move(
+                curses.LINES // 2 - (self.geo['h'] // 2),
+                curses.COLS // 2 - (self.geo['w'] // 2),
+                self.geo['w'],
+                self.geo['h']
+            )
+    
+    def set_box(self, b):
+        self.options['box'] = b
+        
+        if self.options['box']:
+            self.framewin.box()
+            self.datewin.box()
+        else:
+            self.framewin.border(' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ')
+            self.datewin.border(' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ')
+        
+        self.datewin.refresh()
+        self.framewin.refresh()
+    
+    def key_event(self):
+        try:
+            self.stdscr.timeout(1000 * self.options['delay'] + self.options['nsdelay'] // 1000000)
+            c = self.stdscr.getch()
+            
+            if c == -1:  
+                return
+            
+            if self.options['screensaver']:
+                if c != -1 and not self.options['noquit']:
+                    self.running = False
+                else:
+                    if ord('0') <= c <= ord('7'):
+                        self.options['color'] = c - ord('0')
+                        curses.init_pair(1, self.bg, self.options['color'])
+                        curses.init_pair(2, self.options['color'], self.bg)
+                return
+            
+            if c == curses.KEY_RESIZE:
+                self.stdscr.clear()
+                self.stdscr.refresh()
+                self.init(self.stdscr)
+                return
+            
+           
+            if c in (curses.KEY_UP, ord('k'), ord('K')):
+                if (self.geo['x'] >= 1 and not self.options['center']):
+                    self.clock_move(
+                        self.geo['x'] - 1, 
+                        self.geo['y'], 
+                        self.geo['w'], 
+                        self.geo['h']
+                    )
+            
+            elif c in (curses.KEY_DOWN, ord('j'), ord('J')):
+                if (self.geo['x'] <= (curses.LINES - self.geo['h'] - self.DATEWINH) and 
+                    not self.options['center']):
+                    self.clock_move(
+                        self.geo['x'] + 1, 
+                        self.geo['y'], 
+                        self.geo['w'], 
+                        self.geo['h']
+                    )
+            
+            elif c in (curses.KEY_LEFT, ord('h'), ord('H')):
+                if (self.geo['y'] >= 1 and not self.options['center']):
+                    self.clock_move(
+                        self.geo['x'], 
+                        self.geo['y'] - 1, 
+                        self.geo['w'], 
+                        self.geo['h']
+                    )
+            
+            elif c in (curses.KEY_RIGHT, ord('l'), ord('L')):
+                if (self.geo['y'] <= (curses.COLS - self.geo['w'] - 1) and 
+                    not self.options['center']):
+                    self.clock_move(
+                        self.geo['x'], 
+                        self.geo['y'] + 1, 
+                        self.geo['w'], 
+                        self.geo['h']
+                    )
+            
+            elif c in (ord('q'), ord('Q')):
+                if not self.options['noquit']:
+                    self.running = False
+            
+            elif c in (ord('s'), ord('S')):
+                self.set_second()
+            
+            elif c in (ord('t'), ord('T')):
+                self.options['twelve'] = not self.options['twelve']
+                self.update_hour()
+                self.clock_move(
+                    self.geo['x'], 
+                    self.geo['y'], 
+                    self.geo['w'], 
+                    self.geo['h']
+                )
+            
+            elif c in (ord('c'), ord('C')):
+                self.set_center(not self.options['center'])
+            
+            elif c in (ord('b'), ord('B')):
+                self.options['bold'] = not self.options['bold']
+            
+            elif c in (ord('r'), ord('R')):
+                self.options['rebound'] = not self.options['rebound']
+                if self.options['rebound'] and self.options['center']:
+                    self.options['center'] = False
+            
+            elif c in (ord('x'), ord('X')):
+                self.set_box(not self.options['box'])
+            
+            elif ord('0') <= c <= ord('7'):
+                i = c - ord('0')
+                self.options['color'] = i
+                curses.init_pair(1, self.bg, i)
+                curses.init_pair(2, i, self.bg)
+        
+        except curses.error:
+            pass
+    
+    def parse_args(self):
+        import argparse
+        
+        parser = argparse.ArgumentParser(
+            description="TTY-Clock - A terminal clock",
+            epilog="Keys: q=quit, s=toggle seconds, t=toggle 12/24h, c=center, "
+                  "b=bold, r=rebound, x=toggle box, 0-7=change color"
+        )
+        
+        parser.add_argument('-s', action='store_true', help='Show seconds')
+        parser.add_argument('-S', action='store_true', help='Screensaver mode')
+        parser.add_argument('-x', action='store_true', help='Show box')
+        parser.add_argument('-c', action='store_true', help='Center the clock')
+        parser.add_argument('-C', type=int, choices=range(8), default=2, 
+                          help='Set clock color (0-7)')
+        parser.add_argument('-b', action='store_true', help='Use bold colors')
+        parser.add_argument('-t', action='store_true', help='12-hour format')
+        parser.add_argument('-u', action='store_true', help='Use UTC time')
+        parser.add_argument('-r', action='store_true', help='Rebound the clock')
+        parser.add_argument('-f', default="%F", help='Date format')
+        parser.add_argument('-n', action='store_true', help="Don't quit on keypress")
+        parser.add_argument('-v', action='store_true', help='Show version')
+        parser.add_argument('-i', action='store_true', help='Show info')
+        parser.add_argument('-D', action='store_false', dest='date', 
+                          help='Hide date')
+        parser.add_argument('-B', action='store_true', help='Enable blinking colon')
+        parser.add_argument('-d', type=int, default=1, 
+                          help='Delay between redraws (seconds)')
+        parser.add_argument('-a', type=int, default=0, 
+                          help='Additional delay (nanoseconds)')
+        
+        args = parser.parse_args()
+
+
+        self.options['second'] = args.s
+        self.options['screensaver'] = args.S
+        self.options['box'] = args.x
+        self.options['center'] = args.c
+        self.options['color'] = args.C
+        self.options['bold'] = args.b
+        self.options['twelve'] = args.t
+        self.options['utc'] = args.u
+        self.options['rebound'] = args.r
+        self.options['format'] = args.f
+        self.options['noquit'] = args.n
+        self.options['date'] = args.date
+        self.options['blink'] = args.B
+        self.options['delay'] = args.d
+        self.options['nsdelay'] = args.a
+        
+        if args.v:
+            print("TTY-Clock 2 (Python rewrite)")
+            sys.exit(0)
+        
+        if args.i:
+            print("TTY-Clock 2 (Python rewrite) based on original by Martin Duquesnoy")
+            sys.exit(0)
+    
+    def run(self):
+        self.parse_args()
+        
+        try:
+            wrapper(self.main_loop)
+        except KeyboardInterrupt:
+            pass
+    
+    def main_loop(self, stdscr):
+        self.init(stdscr)
+        
+        while self.running:
+            self.clock_rebound()
+            self.update_hour()
+            self.draw_clock()
+            self.key_event()
+
+if __name__ == "__main__":
+    clock = TTYClock()
+    clock.run()
